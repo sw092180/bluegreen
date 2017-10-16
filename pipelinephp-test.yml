@@ -1,0 +1,328 @@
+apiVersion: v1
+kind: Template
+labels:
+  template: b2g-pipeline-test
+message: A Jenkins server will be automatically instantiated in this project to manage
+  the Pipeline BuildConfig created by this template.  You will be able to log in to
+  it using your OpenShift user credentials.
+metadata:
+  annotations:
+    description: This example showcases a blue green deployment using a Jenkins
+      pipeline that pauses for approval.
+    iconClass: icon-jenkins
+    tags: instant-app,jenkins
+  name: b2g-pipeline-test
+objects:
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    annotations:
+      pipeline.alpha.openshift.io/uses: '[{"name": "${NAME}", "namespace": "", "kind": "DeploymentConfig"}]'
+    creationTimestamp: null
+    labels:
+      name: b2g-pipeline-test
+    name: b2g-pipeline-test
+  spec:
+    strategy:
+      jenkinsPipelineStrategy:
+        jenkinsfile: |-
+          def appName="${NAME}"
+          def project="b2gdemo-test"
+          def tag="blue"
+          def altTag="green"
+          def verbose="${VERBOSE}"
+
+          node {
+            project = env.PROJECT_NAME
+            stage("Initialize") {
+              sh "oc get route ${appName} -n ${project} -o jsonpath='{ .spec.to.name }' --loglevel=4 > activeservice"
+              activeService = readFile('activeservice').trim()
+              if (activeService == "${appName}-blue") {
+                tag = "green"
+                altTag = "blue"
+              }
+              sh "oc get route ${tag}-${appName} -n ${project} -o jsonpath='{ .spec.host }' --loglevel=4 > routehost"
+              routeHost = readFile('routehost').trim()
+            }
+
+            stage("Build") {
+              echo "building tag ${tag}"
+              openshiftBuild buildConfig: appName, showBuildLogs: "true", verbose: verbose
+            }
+
+            stage("Deploy Test") {
+              openshiftTag srcStream: appName, srcTag: 'latest', destinationStream: appName, destinationTag: tag, verbose: verbose
+              openshiftVerifyDeployment deploymentConfig: "${appName}-${tag}", verbose: verbose
+            }
+
+            stage("Test") {
+              input message: "Test deployment: http://${routeHost}. Approve?", id: "approval"
+            }
+
+            stage("Go Live") {
+              sh "oc set -n ${project} route-backends ${appName} ${appName}-${tag}=100 ${appName}-${altTag}=0 --loglevel=4"
+            }
+          }
+      type: JenkinsPipeline
+    triggers:
+    - github:
+        secret: "${GITHUB_WEBHOOK_SECRET}"
+      type: GitHub
+    - generic:
+        secret: "${GENERIC_WEBHOOK_SECRET}"
+      type: Generic
+- apiVersion: v1
+  kind: Route
+  metadata:
+    name: blue-${NAME}
+  spec:
+    to:
+      kind: Service
+      name: ${NAME}-blue
+- apiVersion: v1
+  kind: Route
+  metadata:
+    name: green-${NAME}
+  spec:
+    to:
+      kind: Service
+      name: ${NAME}-green
+- apiVersion: v1
+  kind: Route
+  metadata:
+    name: ${NAME}
+  spec:
+    alternateBackends:
+    - name: ${NAME}-green
+      weight: "0"
+    to:
+      kind: Service
+      name: ${NAME}-blue
+      weight: "100"
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    annotations:
+      description: Keeps track of changes in the application image
+    name: ${NAME}
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    annotations:
+      description: Defines how to build the application
+    name: ${NAME}
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: ${NAME}:latest
+    source:
+      contextDir: ${CONTEXT_DIR}
+      git:
+        ref: ${SOURCE_REPOSITORY_REF}
+        uri: ${SOURCE_REPOSITORY_URL}
+      type: Git
+    strategy:
+      sourceStrategy:
+        from:
+          kind: ImageStreamTag
+          name: php:5.5
+          namespace: ${NAMESPACE}
+      type: Source
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      description: Something
+    name: ${NAME}-blue
+  spec:
+    ports:
+    - name: web
+      port: 8080
+      targetPort: 8080
+    selector:
+      name: ${NAME}-blue
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    annotations:
+      description: Defines how to deploy the application server
+    name: ${NAME}-blue
+  spec:
+    strategy:
+      type: Rolling
+      rollingParams:
+        updatePeriodSeconds: 1
+        intervalSeconds: 1
+        timeoutSeconds: 600
+        maxUnavailable: 25%
+        maxSurge: 25%
+      resources: {}
+    triggers:
+      - type: ImageChange
+        imageChangeParams:
+          automatic: true
+          containerNames:
+            - php-web-example
+          from:
+            kind: ImageStreamTag
+            name: ${NAME}:blue
+      - type: ConfigChange
+    replicas: 1
+    test: false
+    selector:
+      name: ${NAME}-blue
+    template:
+      metadata:
+        labels:
+          name: ${NAME}-blue
+        name: ${NAME}-blue
+      spec:
+        containers:
+          - name: php-web-example
+            image: ' '
+            livenessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 600
+              timeoutSeconds: 3
+            ports:
+              - containerPort: 8080
+                protocol: TCP
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 600
+              timeoutSeconds: 3
+            resources:
+              limits:
+                memory: ${MEMORY_LIMIT}
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 30
+        dnsPolicy: ClusterFirst
+        securityContext: {}    
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      description: Something
+    name: ${NAME}-green
+  spec:
+    ports:
+    - name: web
+      port: 8080
+      targetPort: 8080
+    selector:
+      name: ${NAME}-green
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    annotations:
+      description: Defines how to deploy the application server
+    name: ${NAME}-green
+  spec:
+    strategy:
+      type: Rolling
+      rollingParams:
+        updatePeriodSeconds: 1
+        intervalSeconds: 1
+        timeoutSeconds: 600
+        maxUnavailable: 25%
+        maxSurge: 25%
+      resources: {}
+    triggers:
+      - type: ImageChange
+        imageChangeParams:
+          automatic: true
+          containerNames:
+            - php-web-example
+          from:
+            kind: ImageStreamTag
+            name: ${NAME}:green
+      - type: ConfigChange
+    replicas: 1
+    test: false
+    selector:
+      name: ${NAME}-green
+    template:
+      metadata:
+        labels:
+          name: ${NAME}-green
+        name: ${NAME}-green
+      spec:
+        containers:
+          - name: php-web-example
+            image: ' '
+            livenessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 600
+              timeoutSeconds: 3
+            ports:
+              - containerPort: 8080
+                protocol: TCP
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              initialDelaySeconds: 600
+              timeoutSeconds: 3
+            resources:
+              limits:
+                memory: ${MEMORY_LIMIT}
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 30
+        dnsPolicy: ClusterFirst
+        securityContext: {}    
+parameters:
+- description: The name assigned to all of the frontend objects defined in this template.
+  displayName: Name
+  name: NAME
+  required: true
+  value: php-web-test
+- description: The exposed hostname that will route to the Node.js service, if left
+    blank a value will be defaulted.
+  displayName: Application Hostname
+  name: APPLICATION_DOMAIN
+- description: The URL of the repository with your application source code.
+  displayName: Git Repository URL
+  name: SOURCE_REPOSITORY_URL
+  required: true
+  value: http://gogs-cicddev.azapps.hpeplatformservices.com/azman/os-sample-php.git
+- description: The reference of the repository with your application source code.
+  displayName: Git Repository Ref
+  name: SOURCE_REPOSITORY_REF
+  required: true
+  value: test
+- description: Maximum amount of memory the Node.js container can use.
+  displayName: Memory Limit
+  name: MEMORY_LIMIT
+  required: true
+  value: 512Mi
+- description: Set this to the relative path to your project if it is not in the root
+    of your repository.
+  displayName: Context Directory
+  name: CONTEXT_DIR
+- description: A secret string used to configure the GitHub webhook.
+  displayName: GitHub Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+  name: GITHUB_WEBHOOK_SECRET
+- description: A secret string used to configure the Generic webhook.
+  displayName: Generic Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+  name: GENERIC_WEBHOOK_SECRET
+- description: The OpenShift Namespace where the NodeJS and MongoDB ImageStreams reside.
+  displayName: Namespace
+  name: NAMESPACE
+  required: true
+  value: openshift
+- description: Whether to enable verbose logging of Jenkinsfile steps in pipeline
+  displayName: Verbose
+  name: VERBOSE
+  required: true
+  value: "false"
